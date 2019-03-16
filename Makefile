@@ -9,7 +9,7 @@ RM:=rm
 
 all: clean modules app
 
-obj-m:= kechenl3_MP1.o
+obj-m:= kechenl3_MP2.o
 
 modules:
 	$(MAKE) -C $(KERNEL_SRC) M=$(SUBDIR) modules
