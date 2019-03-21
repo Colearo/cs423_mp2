@@ -2,9 +2,11 @@
 
 #include <linux/module.h>
 #include <linux/kernel.h>
+#include <linux/kthread.h>
 #include <linux/proc_fs.h>
 #include <linux/list.h>
 #include <linux/slab.h>
+#include <linux/spinlock.h>
 #include <linux/timer.h>
 #include <linux/jiffies.h>
 #include <linux/workqueue.h>
@@ -16,7 +18,7 @@ MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Kechen Lu");
 MODULE_DESCRIPTION("CS-423 MP2 RMS scheduler");
 
-// #define DEBUG 0
+#define DEBUG 0
 
 // Declare all needed global variables for the proc fs initializaiton
 // The mp1 directory
@@ -26,13 +28,44 @@ struct proc_dir_entry * mp2_dir;
 #define MP2_STAT "status"
 struct proc_dir_entry * mp2_status;
 
+// Kernel slab cache allocator
+struct kmem_cache *tasks_cache;
+
+// Kernel dispatcher name
+#define RMS_DISPATCHER "rms_dispatcher"
+
+// Spinlock
+spinlock_t sl;
+
 // Define the structure to persist the PID and its attributes
 struct registration_block {
-    int pid;
+    unsigned int pid;
     unsigned long period;
     unsigned long computation_period;
 };
 
+// Define the dispatching thread
+struct task_struct* dispatcher;
+
+// Define the customized task struct
+struct mp2_task_struct {
+    struct task_struct* linux_task;
+    struct timer_list wakeup_timer;
+    struct registration_block rb;
+    struct list_head next;
+
+#define RUNNING  0x01
+#define READY    0x02
+#define SLEEPING 0x03
+    unsigned int state;
+    uint64_t next_release;
+};
+
+// Define the current task running
+struct mp2_task_struct* curr_mp2_task;
+
+// Define the tasks list
+LIST_HEAD(reg_task_list);
 
 // Parser helper function to get next phrase between comma
 char* parse_next_phrase(char **str) {
@@ -46,7 +79,7 @@ char* parse_next_phrase(char **str) {
 	return NULL;
     }
 
-    while(*str != NULL) {
+    while(*(*str) != 0) {
 	*(p++) = *((*str)++);
 	if (*(*str) == ',') {
 	    (*str)++;
@@ -59,6 +92,192 @@ char* parse_next_phrase(char **str) {
 
 #define MAX_BUF_SIZE 4096
 
+// Timer callback 
+static void timer_callback(unsigned long data) {
+    struct mp2_task_struct *task_ptr = (struct mp2_task_struct*)data;
+    unsigned long flags;
+
+    printk(KERN_DEBUG "Timer callback %d\n", task_ptr->rb.pid);
+
+    // Spinlock lock
+    spin_lock_irqsave(&sl, flags);
+    // Change the state of the new period task to READY
+    task_ptr->state = READY;
+    // Spinlock unlock
+    spin_unlock_irqrestore(&sl, flags);
+
+    // Wake up the scheduler
+    wake_up_process(dispatcher);
+}
+
+// Registration func for process to register
+static ssize_t registration(unsigned int pid, unsigned long period, unsigned long computation_period) {
+    struct mp2_task_struct *task_ptr;
+    unsigned long flags;
+
+    // Allocate the corresponding struct using slab cache allocator
+    task_ptr = kmem_cache_alloc(tasks_cache, GFP_KERNEL);
+
+    // Get the task PCB by PID
+    task_ptr->linux_task = find_task_by_pid(pid);
+    if (task_ptr->linux_task == NULL) {
+	kmem_cache_free(tasks_cache, task_ptr);
+	return -EFAULT;
+    }
+
+    // Assign the pid and other information of this task to the registration_block
+    task_ptr->rb.pid = pid;
+    task_ptr->rb.period = period;
+    task_ptr->rb.computation_period = computation_period;
+
+    // Initialize the timer
+    setup_timer(&task_ptr->wakeup_timer, timer_callback, (unsigned long)task_ptr);
+    task_ptr->next_release = jiffies;
+    /*mod_timer(&task_ptr->wakeup_timer, jiffies + msecs_to_jiffies(5000));*/
+
+    // Initialize the state of the task to SLEEPING
+    task_ptr->state = SLEEPING;
+
+    // Linked list entry
+    INIT_LIST_HEAD(&task_ptr->next);
+
+    // Spinlock lock
+    spin_lock_irqsave(&sl, flags);
+    // Add the task to the registartion task list
+    list_add(&task_ptr->next, &reg_task_list);
+    // Spinlock unlock
+    spin_unlock_irqrestore(&sl, flags);
+
+    return 0;
+}
+
+// De-registration for the tasks by pid
+static ssize_t deregistration(unsigned int pid) {
+    struct mp2_task_struct *cur, *temp;
+    int flag = 0;
+    unsigned long flags;
+
+    // Spinlock lock
+    spin_lock_irqsave(&sl, flags);
+    //Iterate the whole linked list to delete the PID equals this pid
+    list_for_each_entry_safe(cur, temp, &reg_task_list, next) {
+	// If the current task's pid is the one we want, delete it
+	if (cur->rb.pid == pid) {
+	    flag = 1;
+	    del_timer(&cur->wakeup_timer);
+	    list_del(&cur->next);
+	    kmem_cache_free(tasks_cache, cur);
+	}
+    }
+    // Spinlock unlock
+    spin_unlock_irqrestore(&sl, flags);
+
+    if (flag == 0) 
+	return -EFAULT;
+
+    return 0;
+}
+
+// YEILD function to relinquish the CPU 
+static ssize_t yielding(unsigned int pid) {
+    struct mp2_task_struct *cur, *temp;
+    int flag = 0;
+    unsigned long flags;
+
+    // Spinlock lock
+    spin_lock_irqsave(&sl, flags);
+    //Iterate the whole linked list to find the pid
+    list_for_each_entry_safe(cur, temp, &reg_task_list, next) {
+	// If the current task's pid is what we want
+	if (cur->rb.pid == pid) {
+	    flag = 1;
+	    cur->state = SLEEPING;
+	    set_task_state(cur->linux_task, TASK_UNINTERRUPTIBLE);
+
+	    // Precceding the timer
+	    if (cur->next_release + msecs_to_jiffies(cur->rb.period) > jiffies) {
+		cur->next_release += msecs_to_jiffies(cur->rb.period);
+		mod_timer(&cur->wakeup_timer, cur->next_release);
+	    } else {
+		return -EFAULT;
+	    }
+
+	    // Wake up the scheduler
+	    wake_up_process(dispatcher);
+
+	    break;
+	}
+    }
+
+    // Spinlock unlock
+    spin_unlock_irqrestore(&sl, flags);
+
+    if (flag == 0) 
+	return -EFAULT;
+
+    return 0;
+}
+
+// Helper function to get the highest priority 
+struct mp2_task_struct* get_highest_task(void) {
+    struct mp2_task_struct *cur, *temp, *res;
+    unsigned long shortest = (0x01UL << 63) - 1;
+    unsigned long flags;
+
+    res = NULL;
+
+    spin_lock_irqsave(&sl, flags);
+    //Iterate the whole linked list to found the one with shortest period
+    list_for_each_entry_safe(cur, temp, &reg_task_list, next) {
+	// If the current task's period is shorter than the found
+	if (cur->state == READY && cur->rb.period < shortest) {
+	    shortest = cur->rb.period;
+	    res = cur;
+	}
+    }
+    spin_unlock_irqrestore(&sl, flags);
+
+    return res;
+}
+
+// Dispatcher thread to schedule the tasks
+static int dispatching(void *data) {
+    struct mp2_task_struct *highest;
+    struct sched_param sparam;
+    unsigned long flags;
+
+    while(!kthread_should_stop()) {
+	highest = get_highest_task();
+	if (highest == NULL) 
+	    goto SLEEP;
+
+	spin_lock_irqsave(&sl, flags);
+	highest->state = RUNNING;
+	if (curr_mp2_task) {
+	    if (curr_mp2_task->state == RUNNING) {
+		curr_mp2_task->state = READY;
+		curr_mp2_task = NULL;
+	    }
+	    sparam.sched_priority = 0;
+	    sched_setscheduler(curr_mp2_task->linux_task, SCHED_NORMAL, &sparam);
+	}
+	spin_unlock_irqrestore(&sl, flags);
+	
+	// set_task_state(highest->linux_task, TASK_RUNNING)
+	// Wake up the highest task
+	wake_up_process(highest->linux_task);
+	sparam.sched_priority = 99;
+	sched_setscheduler(curr_mp2_task->linux_task, SCHED_FIFO, &sparam);
+	curr_mp2_task = highest;
+
+SLEEP:	// Sleep
+	set_current_state(TASK_INTERRUPTIBLE);
+	schedule();
+    }
+
+    return 0;
+}
+
 // Decalre the callback functions for proc read and write
 // Write callback function for user space to write pid to the 
 // /proc/mp2/status file
@@ -69,10 +288,8 @@ ssize_t write_call(struct file *file,
     // Local variable to store the result copied from user buffer
     char *kern_buf, *token, *head;
     // Variables used in the kstrtoul()
-    unsigned long pid_val;
+    unsigned long pid_val, period, computation_period;
     int ret = 0;
-    // Structures for pid info
-    struct registration_block *rb;
 
     // Using vmalloc() to allocate buffer for kernel space
     kern_buf = (char *)kmalloc(MAX_BUF_SIZE * sizeof(char), GFP_KERNEL);
@@ -86,6 +303,7 @@ ssize_t write_call(struct file *file,
 	ret = -EFAULT;
 	goto RET;
     }
+
     if (copy_from_user(kern_buf, usr_buf, n)) {
 	ret = -EFAULT;
 	goto RET;
@@ -103,34 +321,34 @@ ssize_t write_call(struct file *file,
     switch(kern_buf[0]) {
 	case 'R' :
 	    printk(KERN_DEBUG "REGISTRATION\n");
-	    rb = kmalloc(sizeof(struct registration_block), GFP_KERNEL);
 
 	    kern_buf += 2;
 	    token = parse_next_phrase(&kern_buf);
 	    // Convert the pid string to the integer type
-	    ret = kstrtol(token, 10, &pid_val);
-	    if (ret != 0) {
-		kfree(rb);
+	    ret = kstrtoul(token, 10, &pid_val);
+	    kfree(token);
+	    if (ret != 0) 
 		goto RET;
-	    }
-	    printk(KERN_DEBUG "PID: [%d]\n", (int)pid_val);
-	    rb->pid = (int)pid_val;
+	    printk(KERN_DEBUG "PID: [%d]\n", (unsigned int)pid_val);
 
 	    token = parse_next_phrase(&kern_buf);
-	    ret = kstrtoul(token, 10, &rb->period);
-	    if (ret != 0) {
-		kfree(rb);
+	    ret = kstrtoul(token, 10, &period);
+	    kfree(token);
+	    if (ret != 0) 
 		goto RET;
-	    }
-	    printk(KERN_DEBUG "PERIOD: [%lu]\n", rb->period);
+	    printk(KERN_DEBUG "PERIOD: [%lu]\n", period);
 
 	    token = parse_next_phrase(&kern_buf);
-	    ret = kstrtoul(token, 10, &rb->computation_period);
-	    if (ret != 0) {
-		kfree(rb);
+	    ret = kstrtoul(token, 10, &computation_period);
+	    kfree(token);
+	    if (ret != 0) 
 		goto RET;
-	    }
-	    printk(KERN_DEBUG "COMPUTATION PERIOD: [%lu]\n", rb->computation_period);
+	    printk(KERN_DEBUG "COMPUTATION PERIOD: [%lu]\n", computation_period);
+
+	    // REGISTRATION for the new task
+	    ret = registration(pid_val, period, computation_period);
+	    if (ret != 0)
+		goto RET;
 
 	    break;
 
@@ -141,9 +359,15 @@ ssize_t write_call(struct file *file,
 	    token = parse_next_phrase(&kern_buf);
 	    // Convert the pid string to the integer type
 	    ret = kstrtol(token, 10, &pid_val);
+	    kfree(token);
 	    if (ret != 0) 
 		goto RET;
 	    printk(KERN_DEBUG "PID: [%d]\n", (int)pid_val);
+
+	    ret = yielding((unsigned int)pid_val);
+	    if (ret != 0)
+		goto RET;
+
 	    break;
 
 	case 'D' :
@@ -153,9 +377,14 @@ ssize_t write_call(struct file *file,
 	    token = parse_next_phrase(&kern_buf);
 	    // Convert the pid string to the integer type
 	    ret = kstrtol(token, 10, &pid_val);
+	    kfree(token);
 	    if (ret != 0) 
 		goto RET;
 	    printk(KERN_DEBUG "PID: [%d]\n", (int)pid_val);
+
+	    ret = deregistration(pid_val);
+	    if (ret != 0)
+		goto RET;
 	    break;
 
 	default :
@@ -164,6 +393,7 @@ ssize_t write_call(struct file *file,
 	    goto RET;
     }
 
+    ret = n;
 
 RET: kfree(head);
      return ret;
@@ -179,6 +409,8 @@ ssize_t read_call(struct file *file,
     // Local variable to store the data would copy to user buffer
     char* kern_buf;
     int length = 0;
+    unsigned long flags;
+    struct mp2_task_struct *cur, *temp;
 
     // Using kmalloc() to allocate buffer for kernel space
     kern_buf = (char *)kmalloc(MAX_BUF_SIZE * sizeof(char), GFP_KERNEL);
@@ -192,6 +424,14 @@ ssize_t read_call(struct file *file,
 	kfree(kern_buf);
 	return 0;
     }
+
+    spin_lock_irqsave(&sl, flags);
+    list_for_each_entry_safe(cur, temp, &reg_task_list, next) {
+	// Iterate the list to cat the information of each managed task
+	length += sprintf(kern_buf + length, "PID[%u]: STATE(%u) NEXT_PERIOD(%llu)\n", cur->rb.pid, cur->state, cur->next_release);
+    }
+    spin_unlock_irqrestore(&sl, flags);
+
 
     // If no pid registered in list
     if (length == 0) {
@@ -232,18 +472,39 @@ int __init mp2_init(void) {
    // Make a new proc entry /proc/mp1/status
    mp2_status = proc_create(MP2_STAT, 0666, mp2_dir, &mp2_proc_fops); 
 
+   // Make a new slab cache
+   tasks_cache = KMEM_CACHE(mp2_task_struct, SLAB_HWCACHE_ALIGN|SLAB_PANIC);
+
+   // Make a new kernel thread for RM scheduler
+   dispatcher = kthread_create(dispatching, NULL, RMS_DISPATCHER);
+
+   // Make a new spinlock for sychronization
+   spin_lock_init(&sl);
+
    printk(KERN_ALERT "MP2 MODULE LOADED\n");
    return 0;   
 }
 
 // mp2_exit - Called when module is unloaded
 void __exit mp2_exit(void) {
+   struct mp2_task_struct *cur, *temp;
+
    #ifdef DEBUG
    printk(KERN_ALERT "MP1 MODULE UNLOADING\n");
    #endif
+
    // Remove all the proc file entry and dir we created before
    proc_remove(mp2_status);
    proc_remove(mp2_dir);
+
+   //Iterate the whole linked list to delete the PID equals this pid
+   list_for_each_entry_safe(cur, temp, &reg_task_list, next) {
+	    del_timer(&cur->wakeup_timer);
+	    list_del(&cur->next);
+	    kmem_cache_free(tasks_cache, cur);
+   }
+
+   kmem_cache_destroy(tasks_cache);
 
    printk(KERN_ALERT "MP2 MODULE UNLOADED\n");
 }
