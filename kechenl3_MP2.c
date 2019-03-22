@@ -182,8 +182,7 @@ static void __deregistration(unsigned int pid, int* flag) {
 
 	    // If current running task is this one we want to delete
 	    // just let the curr_mp2_task become NULL
-	    if (curr_mp2_task->rb.pid == pid) 
-		curr_mp2_task = NULL;
+	    curr_mp2_task = NULL;
 
 	    // Compute the task's rate, and sub it from the rate_sum when
 	    // deregistration happens
@@ -214,11 +213,11 @@ static ssize_t deregistration(unsigned int pid) {
     // Spinlock unlock
     spin_unlock_irqrestore(&sl, flags);
 
-    // Wake up the scheduler
-    wake_up_process(dispatcher);
-
     if (flag == 0) 
 	return -EFAULT;
+
+    // Wake up the scheduler
+    wake_up_process(dispatcher);
 
     return 0;
 }
@@ -302,17 +301,17 @@ static int dispatching(void *data) {
 	printk(KERN_DEBUG "Dispatching: Start\n");
 
 	spin_lock_irqsave(&sl, flags);
-	
-	if (curr_mp2_task && curr_mp2_task->state == RUNNING) {
-		curr_mp2_task->state = READY;
-		sparam.sched_priority = 0;
-		sched_setscheduler(curr_mp2_task->linux_task, SCHED_NORMAL, &sparam);
-		curr_mp2_task = NULL;
-		printk(KERN_DEBUG "Old Task %d Running to Ready\n", curr_mp2_task->rb.pid);
-	} else if (curr_mp2_task) {
+
+	if (curr_mp2_task) {
 	    sparam.sched_priority = 0;
 	    sched_setscheduler(curr_mp2_task->linux_task, SCHED_NORMAL, &sparam);
 	    printk(KERN_DEBUG "Old Task %d Not Running\n", curr_mp2_task->rb.pid);
+	}
+
+	if (curr_mp2_task && curr_mp2_task->state == RUNNING) {
+		curr_mp2_task->state = READY;
+		curr_mp2_task = NULL;
+		printk(KERN_DEBUG "Old Task %d Running to Ready\n", curr_mp2_task->rb.pid);
 	}
 
 	highest = get_highest_task();
@@ -321,7 +320,6 @@ static int dispatching(void *data) {
 	    goto SLEEP;
 	}
 	highest->state = RUNNING;
-	spin_unlock_irqrestore(&sl, flags);
 	
 	printk(KERN_DEBUG "New Task %d Running\n", highest->rb.pid);
 	// set_task_state(highest->linux_task, TASK_RUNNING)
@@ -330,6 +328,8 @@ static int dispatching(void *data) {
 	sched_setscheduler(highest->linux_task, SCHED_FIFO, &sparam);
 	curr_mp2_task = highest;
 	wake_up_process(highest->linux_task);
+
+	spin_unlock_irqrestore(&sl, flags);
 
 SLEEP:	// Sleep
 	set_current_state(TASK_INTERRUPTIBLE);
