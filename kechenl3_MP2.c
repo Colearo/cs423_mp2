@@ -97,10 +97,9 @@ static void timer_callback(unsigned long data) {
     struct mp2_task_struct *task_ptr = (struct mp2_task_struct*)data;
     unsigned long flags;
 
-    printk(KERN_DEBUG "Timer callback %d\n", task_ptr->rb.pid);
-
     // Spinlock lock
     spin_lock_irqsave(&sl, flags);
+    printk(KERN_DEBUG "Timer callback %d [state %d]\n", task_ptr->rb.pid, task_ptr->state);
     // Change the state of the new period task to READY
     task_ptr->state = READY;
     // Spinlock unlock
@@ -108,6 +107,8 @@ static void timer_callback(unsigned long data) {
 
     // Wake up the scheduler
     wake_up_process(dispatcher);
+
+    printk(KERN_DEBUG "Timer after waking up dispatcher\n");
 }
 
 // Registration func for process to register
@@ -164,6 +165,8 @@ static ssize_t deregistration(unsigned int pid) {
 	// If the current task's pid is the one we want, delete it
 	if (cur->rb.pid == pid) {
 	    flag = 1;
+	    if (curr_mp2_task->rb.pid == pid) 
+		curr_mp2_task = NULL;
 	    del_timer(&cur->wakeup_timer);
 	    list_del(&cur->next);
 	    kmem_cache_free(tasks_cache, cur);
@@ -171,6 +174,9 @@ static ssize_t deregistration(unsigned int pid) {
     }
     // Spinlock unlock
     spin_unlock_irqrestore(&sl, flags);
+
+    // Wake up the scheduler
+    wake_up_process(dispatcher);
 
     if (flag == 0) 
 	return -EFAULT;
@@ -199,11 +205,8 @@ static ssize_t yielding(unsigned int pid) {
 		cur->next_release += msecs_to_jiffies(cur->rb.period);
 		mod_timer(&cur->wakeup_timer, cur->next_release);
 	    } else {
-		return -EFAULT;
+		return -EINVAL;
 	    }
-
-	    // Wake up the scheduler
-	    wake_up_process(dispatcher);
 
 	    break;
 	}
@@ -211,6 +214,10 @@ static ssize_t yielding(unsigned int pid) {
 
     // Spinlock unlock
     spin_unlock_irqrestore(&sl, flags);
+
+    // Wake up the scheduler
+    wake_up_process(dispatcher);
+    schedule();
 
     if (flag == 0) 
 	return -EFAULT;
@@ -221,12 +228,9 @@ static ssize_t yielding(unsigned int pid) {
 // Helper function to get the highest priority 
 struct mp2_task_struct* get_highest_task(void) {
     struct mp2_task_struct *cur, *temp, *res;
-    unsigned long shortest = (0x01UL << 63) - 1;
-    unsigned long flags;
-
+    unsigned long shortest = -1;
     res = NULL;
 
-    spin_lock_irqsave(&sl, flags);
     //Iterate the whole linked list to found the one with shortest period
     list_for_each_entry_safe(cur, temp, &reg_task_list, next) {
 	// If the current task's period is shorter than the found
@@ -235,7 +239,6 @@ struct mp2_task_struct* get_highest_task(void) {
 	    res = cur;
 	}
     }
-    spin_unlock_irqrestore(&sl, flags);
 
     return res;
 }
@@ -247,28 +250,33 @@ static int dispatching(void *data) {
     unsigned long flags;
 
     while(!kthread_should_stop()) {
-	highest = get_highest_task();
-	if (highest == NULL) 
-	    goto SLEEP;
-
+	printk(KERN_DEBUG "Dispatching: Start\n");
 	spin_lock_irqsave(&sl, flags);
-	highest->state = RUNNING;
-	if (curr_mp2_task) {
-	    if (curr_mp2_task->state == RUNNING) {
+	if (curr_mp2_task && curr_mp2_task->state == RUNNING) {
 		curr_mp2_task->state = READY;
 		curr_mp2_task = NULL;
-	    }
+		printk(KERN_DEBUG "Old Task %d Running to Ready\n", curr_mp2_task->rb.pid);
+	} else if (curr_mp2_task) {
 	    sparam.sched_priority = 0;
 	    sched_setscheduler(curr_mp2_task->linux_task, SCHED_NORMAL, &sparam);
+	    printk(KERN_DEBUG "Old Task %d Not Running\n", curr_mp2_task->rb.pid);
 	}
+
+	highest = get_highest_task();
+	if (highest == NULL) {
+	    spin_unlock_irqrestore(&sl, flags);
+	    goto SLEEP;
+	}
+	highest->state = RUNNING;
 	spin_unlock_irqrestore(&sl, flags);
 	
+	printk(KERN_DEBUG "New Task %d Running\n", highest->rb.pid);
 	// set_task_state(highest->linux_task, TASK_RUNNING)
 	// Wake up the highest task
-	wake_up_process(highest->linux_task);
 	sparam.sched_priority = 99;
-	sched_setscheduler(curr_mp2_task->linux_task, SCHED_FIFO, &sparam);
+	sched_setscheduler(highest->linux_task, SCHED_FIFO, &sparam);
 	curr_mp2_task = highest;
+	wake_up_process(highest->linux_task);
 
 SLEEP:	// Sleep
 	set_current_state(TASK_INTERRUPTIBLE);
@@ -432,7 +440,6 @@ ssize_t read_call(struct file *file,
     }
     spin_unlock_irqrestore(&sl, flags);
 
-
     // If no pid registered in list
     if (length == 0) {
 	kfree(kern_buf);
@@ -505,6 +512,8 @@ void __exit mp2_exit(void) {
    }
 
    kmem_cache_destroy(tasks_cache);
+
+   kthread_stop(dispatcher);
 
    printk(KERN_ALERT "MP2 MODULE UNLOADED\n");
 }
