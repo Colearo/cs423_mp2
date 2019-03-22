@@ -277,16 +277,20 @@ static int dispatching(void *data) {
 
     while(!kthread_should_stop()) {
 	printk(KERN_DEBUG "Dispatching: Start\n");
-	spin_lock_irqsave(&sl, flags);
-	if (curr_mp2_task && curr_mp2_task->state == RUNNING) {
-		curr_mp2_task->state = READY;
-		curr_mp2_task = NULL;
-		printk(KERN_DEBUG "Old Task %d Running to Ready\n", curr_mp2_task->rb.pid);
-	} else if (curr_mp2_task) {
+
+	if (curr_mp2_task) {
 	    sparam.sched_priority = 0;
 	    sched_setscheduler(curr_mp2_task->linux_task, SCHED_NORMAL, &sparam);
 	    printk(KERN_DEBUG "Old Task %d Not Running\n", curr_mp2_task->rb.pid);
 	}
+
+	if (curr_mp2_task && curr_mp2_task->state == RUNNING) {
+		curr_mp2_task->state = READY;
+		curr_mp2_task = NULL;
+		printk(KERN_DEBUG "Old Task %d Running to Ready\n", curr_mp2_task->rb.pid);
+	} 
+
+	spin_lock_irqsave(&sl, flags);
 
 	highest = get_highest_task();
 	if (highest == NULL) {
