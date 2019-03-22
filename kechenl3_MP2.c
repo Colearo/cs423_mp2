@@ -169,19 +169,16 @@ static ssize_t registration(unsigned int pid, unsigned long period, unsigned lon
     return 0;
 }
 
-// De-registration for the tasks by pid
-static ssize_t deregistration(unsigned int pid) {
+// De-registration not holding the lock
+static void __deregistration(unsigned int pid, int* flag) {
     struct mp2_task_struct *cur, *temp;
-    int flag = 0;
-    unsigned long flags, rate;
+    unsigned long rate;
 
-    // Spinlock lock
-    spin_lock_irqsave(&sl, flags);
     //Iterate the whole linked list to delete the PID equals this pid
     list_for_each_entry_safe(cur, temp, &reg_task_list, next) {
 	// If the current task's pid is the one we want, delete it
 	if (cur->rb.pid == pid) {
-	    flag = 1;
+	    *flag = 1;
 
 	    // If current running task is this one we want to delete
 	    // just let the curr_mp2_task become NULL
@@ -193,11 +190,27 @@ static ssize_t deregistration(unsigned int pid) {
 	    rate = cur->rb.computation_period * 1000 / cur->rb.period;
 	    rate_sum -= rate;
 
+	    // Delete the timer of this task
 	    del_timer(&cur->wakeup_timer);
+	    // Delete the node of this linked list
 	    list_del(&cur->next);
+	    // Free the slab cache
 	    kmem_cache_free(tasks_cache, cur);
 	}
     }
+}
+
+// De-registration for the tasks by pid
+static ssize_t deregistration(unsigned int pid) {
+    int flag = 0;
+    unsigned long flags;
+
+    // Spinlock lock
+    spin_lock_irqsave(&sl, flags);
+
+    // Deregistration to de-allocate and clean the related resources
+    __deregistration(pid, &flag);
+    
     // Spinlock unlock
     spin_unlock_irqrestore(&sl, flags);
 
@@ -210,19 +223,15 @@ static ssize_t deregistration(unsigned int pid) {
     return 0;
 }
 
-// YEILD function to relinquish the CPU 
-static ssize_t yielding(unsigned int pid) {
+// YEILD function wrapper
+static ssize_t __yielding(unsigned int pid, int* flag) {
     struct mp2_task_struct *cur, *temp;
-    int flag = 0;
-    unsigned long flags;
 
-    // Spinlock lock
-    spin_lock_irqsave(&sl, flags);
     //Iterate the whole linked list to find the pid
     list_for_each_entry_safe(cur, temp, &reg_task_list, next) {
 	// If the current task's pid is what we want
 	if (cur->rb.pid == pid) {
-	    flag = 1;
+	    *flag = 1;
 	    cur->state = SLEEPING;
 	    set_task_state(cur->linux_task, TASK_UNINTERRUPTIBLE);
 
@@ -238,6 +247,20 @@ static ssize_t yielding(unsigned int pid) {
 	}
     }
 
+    return 0;
+}
+
+// YEILD function to relinquish the CPU 
+static ssize_t yielding(unsigned int pid) {
+    int ret = 0, flag = 0;
+    unsigned long flags;
+
+    // Spinlock lock
+    spin_lock_irqsave(&sl, flags);
+
+    // Yield function to relinquish the CPU control
+    ret = __yielding(pid, &flag);
+
     // Spinlock unlock
     spin_unlock_irqrestore(&sl, flags);
 
@@ -248,7 +271,7 @@ static ssize_t yielding(unsigned int pid) {
     if (flag == 0) 
 	return -EFAULT;
 
-    return 0;
+    return ret;
 }
 
 // Helper function to get the highest priority 
@@ -278,6 +301,8 @@ static int dispatching(void *data) {
     while(!kthread_should_stop()) {
 	printk(KERN_DEBUG "Dispatching: Start\n");
 
+	spin_lock_irqsave(&sl, flags);
+
 	if (curr_mp2_task) {
 	    sparam.sched_priority = 0;
 	    sched_setscheduler(curr_mp2_task->linux_task, SCHED_NORMAL, &sparam);
@@ -289,8 +314,6 @@ static int dispatching(void *data) {
 		curr_mp2_task = NULL;
 		printk(KERN_DEBUG "Old Task %d Running to Ready\n", curr_mp2_task->rb.pid);
 	} 
-
-	spin_lock_irqsave(&sl, flags);
 
 	highest = get_highest_task();
 	if (highest == NULL) {
