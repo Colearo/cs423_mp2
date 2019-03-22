@@ -37,6 +37,9 @@ struct kmem_cache *tasks_cache;
 // Spinlock
 spinlock_t sl;
 
+// Rate sum multiplied by 1000
+unsigned long rate_sum;
+
 // Define the structure to persist the PID and its attributes
 struct registration_block {
     unsigned int pid;
@@ -111,10 +114,22 @@ static void timer_callback(unsigned long data) {
     printk(KERN_DEBUG "Timer after waking up dispatcher\n");
 }
 
+// Admission control check if the 
+static bool admission_control(unsigned long period, unsigned long c_period) {
+    unsigned long rate = c_period * 1000 / period;
+    if (rate + rate_sum <= 693) {
+	rate_sum += rate;
+	return true;
+    } else {
+	return false;
+    }
+}
+
 // Registration func for process to register
 static ssize_t registration(unsigned int pid, unsigned long period, unsigned long computation_period) {
     struct mp2_task_struct *task_ptr;
     unsigned long flags;
+
 
     // Allocate the corresponding struct using slab cache allocator
     task_ptr = kmem_cache_alloc(tasks_cache, GFP_KERNEL);
@@ -156,7 +171,7 @@ static ssize_t registration(unsigned int pid, unsigned long period, unsigned lon
 static ssize_t deregistration(unsigned int pid) {
     struct mp2_task_struct *cur, *temp;
     int flag = 0;
-    unsigned long flags;
+    unsigned long flags, rate;
 
     // Spinlock lock
     spin_lock_irqsave(&sl, flags);
@@ -165,8 +180,17 @@ static ssize_t deregistration(unsigned int pid) {
 	// If the current task's pid is the one we want, delete it
 	if (cur->rb.pid == pid) {
 	    flag = 1;
+
+	    // If current running task is this one we want to delete
+	    // just let the curr_mp2_task become NULL
 	    if (curr_mp2_task->rb.pid == pid) 
 		curr_mp2_task = NULL;
+
+	    // Compute the task's rate, and sub it from the rate_sum when
+	    // deregistration happens
+	    rate = c_period * 1000 / period;
+	    rate_sum -= rate;
+
 	    del_timer(&cur->wakeup_timer);
 	    list_del(&cur->next);
 	    kmem_cache_free(tasks_cache, cur);
@@ -487,6 +511,9 @@ int __init mp2_init(void) {
 
    // Make a new spinlock for sychronization
    spin_lock_init(&sl);
+
+   // Initialize the rate sum
+   rate_sum = 0;
 
    printk(KERN_ALERT "MP2 MODULE LOADED\n");
    return 0;   
