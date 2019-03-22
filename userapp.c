@@ -109,8 +109,8 @@ static void do_job(unsigned long comput) {
     start = clock();
     end = start + comput * CLOCKS_PER_SEC / 1000;
     // Do the factorial computation repeatedly
-    for (i = 0; i < comput; i++) {
-	for (j = 0; j < 9000; j++)
+    for (i = 0; i < comput * 100; i++) {
+	for (j = 0; j < 180; j++)
 	    factor(16);
 	if (clock() > end)
 	    break;
@@ -167,7 +167,7 @@ int main(int argc, char* argv[])
 	memset(&giveup, 0, sizeof(struct timeval));
 	gettimeofday(&giveup, NULL);
 	printf("%d-th job ended at %ld.%.6ld\n", i, giveup.tv_sec, giveup.tv_usec);
-	/*printf("Job ProcessTime is %lu ms\n", ((giveup.tv_sec * 1000000 + giveup.tv_usec)-(wakeup.tv_sec * 1000000 + wakeup.tv_usec)));*/
+	printf("Job ProcessTime is %llu ms\n", (((unsigned long long) giveup.tv_sec * 1000000 + giveup.tv_usec)-((unsigned long long)wakeup.tv_sec * 1000000 + wakeup.tv_usec))/1000);
 	task_yeild();
     }
 
