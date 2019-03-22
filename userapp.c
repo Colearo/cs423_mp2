@@ -142,7 +142,7 @@ int main(int argc, char* argv[])
     c_period = strtoul(argv[2], &ptr, 10);
     job_num = strtoul(argv[3], &ptr, 10);
     if (period & c_period & job_num == 0) {
-	printf("Invalid arguments, please use ./userapp period computation_period\n");
+	printf("Invalid arguments, please use ./userapp period computation_period number of jobs\n");
 	return 0;
     }
 
