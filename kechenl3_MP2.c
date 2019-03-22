@@ -105,6 +105,7 @@ static void timer_callback(unsigned long data) {
     printk(KERN_DEBUG "Timer callback %d [state %d]\n", task_ptr->rb.pid, task_ptr->state);
     // Change the state of the new period task to READY
     task_ptr->state = READY;
+    set_task_state(task_ptr->linux_task, TASK_INTERRUPTIBLE);
     // Spinlock unlock
     spin_unlock_irqrestore(&sl, flags);
 
@@ -302,16 +303,17 @@ static int dispatching(void *data) {
 
 	spin_lock_irqsave(&sl, flags);
 
-	if (curr_mp2_task) {
+	if (curr_mp2_task && curr_mp2_task->state == RUNNING) {
+		curr_mp2_task->state = READY;
+		set_task_state(curr_mp2_task->linux_task, TASK_INTERRUPTIBLE);
+		sparam.sched_priority = 0;
+		sched_setscheduler(curr_mp2_task->linux_task, SCHED_NORMAL, &sparam);
+		printk(KERN_DEBUG "Old Task %d Running to Ready\n", curr_mp2_task->rb.pid);
+		curr_mp2_task = NULL;
+	} else if (curr_mp2_task) {
 	    sparam.sched_priority = 0;
 	    sched_setscheduler(curr_mp2_task->linux_task, SCHED_NORMAL, &sparam);
 	    printk(KERN_DEBUG "Old Task %d Not Running\n", curr_mp2_task->rb.pid);
-	}
-
-	if (curr_mp2_task && curr_mp2_task->state == RUNNING) {
-		curr_mp2_task->state = READY;
-		curr_mp2_task = NULL;
-		printk(KERN_DEBUG "Old Task %d Running to Ready\n", curr_mp2_task->rb.pid);
 	}
 
 	highest = get_highest_task();
@@ -321,9 +323,9 @@ static int dispatching(void *data) {
 	}
 	highest->state = RUNNING;
 	
-	printk(KERN_DEBUG "New Task %d Running\n", highest->rb.pid);
 	// set_task_state(highest->linux_task, TASK_RUNNING)
 	// Wake up the highest task
+	printk(KERN_DEBUG "New Task %d Running\n", highest->rb.pid);
 	sparam.sched_priority = 99;
 	sched_setscheduler(highest->linux_task, SCHED_FIFO, &sparam);
 	curr_mp2_task = highest;
