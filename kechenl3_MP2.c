@@ -130,6 +130,8 @@ static ssize_t registration(unsigned int pid, unsigned long period, unsigned lon
     struct mp2_task_struct *task_ptr;
     unsigned long flags;
 
+    if (!admission_control(period, computation_period))
+	return -EFAULT;
 
     // Allocate the corresponding struct using slab cache allocator
     task_ptr = kmem_cache_alloc(tasks_cache, GFP_KERNEL);
@@ -188,7 +190,7 @@ static ssize_t deregistration(unsigned int pid) {
 
 	    // Compute the task's rate, and sub it from the rate_sum when
 	    // deregistration happens
-	    rate = c_period * 1000 / period;
+	    rate = cur->rb.computation_period * 1000 / cur->rb.period;
 	    rate_sum -= rate;
 
 	    del_timer(&cur->wakeup_timer);
