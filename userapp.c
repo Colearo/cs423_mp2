@@ -110,7 +110,7 @@ static void do_job(unsigned long comput) {
     end = start + comput * CLOCKS_PER_SEC / 1000;
     // Do the factorial computation repeatedly
     for (i = 0; i < comput; i++) {
-	for (j = 0; j < 5000; j++)
+	for (j = 0; j < 9000; j++)
 	    factor(16);
 	if (clock() > end)
 	    break;
@@ -128,11 +128,11 @@ static unsigned long factor(unsigned long n) {
 int main(int argc, char* argv[])
 {
     unsigned i;
-    unsigned long period, c_period;
+    unsigned long period, c_period, job_num;
     char *ptr;
     struct timeval t0, wakeup, giveup;
 
-    if (argc != 3) {
+    if (argc != 4) {
 	printf("Incompatible number of arguments\n");
 	return 0;
     }
@@ -140,7 +140,8 @@ int main(int argc, char* argv[])
     // Parse the argv to get the two parameters
     period = strtoul(argv[1], &ptr, 10);
     c_period = strtoul(argv[2], &ptr, 10);
-    if (period & c_period == 0) {
+    job_num = strtoul(argv[3], &ptr, 10);
+    if (period & c_period & job_num == 0) {
 	printf("Invalid arguments, please use ./userapp period computation_period\n");
 	return 0;
     }
@@ -158,7 +159,7 @@ int main(int argc, char* argv[])
 
     task_yeild();
 
-    for (i = 0; i < 10; i++) {
+    for (i = 0; i < job_num; i++) {
 	memset(&wakeup, 0, sizeof(struct timeval));
 	gettimeofday(&wakeup, NULL);
 	printf("%d-th job started at %ld.%.6ld\n", i, wakeup.tv_sec, wakeup.tv_usec);
