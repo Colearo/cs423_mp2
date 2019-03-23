@@ -12,10 +12,11 @@ static void task_register(unsigned long period, unsigned long c_period) {
     
     // Get the pid of the current process
     pid_t pid = getpid();
-    // Write pid to the proc file /proc/mp1/status
+    // Write R,PID,PERIOD,PROCESSING_TIME to the proc file /proc/mp2/status
     len = sprintf(buf, "R,%d,%lu,%lu", pid, period, c_period);
     write(fd, buf, len);
     printf("REGISTER PROCESS[%d]\n", pid);
+
     free(buf);
 }
 
@@ -31,15 +32,16 @@ static void task_deregister() {
     
     // Get the pid of the current process
     pid_t pid = getpid();
-    // Write pid to the proc file /proc/mp1/status
+    // Write D,PID to the proc file /proc/mp2/status
     len = sprintf(buf, "D,%d", pid);
     write(fd, buf, len);
     printf("DE-REGISTER PROCESS[%d]\n", pid);
+
     free(buf);
 }
 
-// Write to the proc to yeild and give up the control right of this CPU
-static void task_yeild() {
+// Write to the proc to yield and give up the control right of this CPU
+static void task_yield() {
     // Define the buffer
     char * buf = malloc(MAX_BUF_SIZE * sizeof(char));
     int len;
@@ -50,15 +52,16 @@ static void task_yeild() {
     
     // Get the pid of the current process
     pid_t pid = getpid();
-    // Write pid to the proc file /proc/mp1/status
+    // Write Y,PID to the proc file /proc/mp2/status
     len = sprintf(buf, "Y,%d", pid);
     write(fd, buf, len);
-    printf("YEILD PROCESS[%d]\n", pid);
+    printf("YIELD PROCESS[%d]\n", pid);
+
     free(buf);
 }
 
 // Read from the proc file to learn the pid numbers and its
-// coresponding cpu used time
+// whether in the registered pid list
 static bool has_pid_in_list() {
     // Define the buffer
     char * buf = malloc(MAX_BUF_SIZE * sizeof(char));
@@ -102,7 +105,7 @@ static bool has_pid_in_list() {
     return flag;
 }
 
-// Do the job to have the exactly accurate 
+// Do the job to have the exactly accurate computation time
 static void do_job(unsigned long comput) {
     unsigned long i, j;
     clock_t start, end;
@@ -131,6 +134,7 @@ int main(int argc, char* argv[])
     unsigned long period, c_period, job_num;
     char *ptr;
     struct timeval t0, wakeup, giveup;
+    pid_t pid = getpid();
 
     if (argc != 4) {
 	printf("Incompatible number of arguments\n");
@@ -146,31 +150,42 @@ int main(int argc, char* argv[])
 	return 0;
     }
 
-    // Register the pid
+    // REGISTER the pid
     task_register(period, c_period);
     
-    // Print the pid list
+    // Check the pid list
     if (!has_pid_in_list()) {
 	printf("REGISTER Failed\n");
 	return -1;
     }
 
+    // Get the first starting time at the first YEILD
     gettimeofday(&t0, NULL);
+    printf("[PID %d] Jobs started at %ld.%.6ld\n", pid, t0.tv_sec, t0.tv_usec);
 
-    task_yeild();
+    // YIELD
+    task_yield();
 
+    // Do the periodic jobs of job_num times
     for (i = 0; i < job_num; i++) {
 	memset(&wakeup, 0, sizeof(struct timeval));
 	gettimeofday(&wakeup, NULL);
-	printf("%d-th job started at %ld.%.6ld\n", i, wakeup.tv_sec, wakeup.tv_usec);
+	printf("[PID %d] %d-th job started at %ld.%.6ld\n", pid, i, wakeup.tv_sec, wakeup.tv_usec);
+
+        // Do the job
 	do_job(c_period);
+
 	memset(&giveup, 0, sizeof(struct timeval));
 	gettimeofday(&giveup, NULL);
-	printf("%d-th job ended at %ld.%.6ld\n", i, giveup.tv_sec, giveup.tv_usec);
-	printf("Job ProcessTime is %llu ms\n", (((unsigned long long) giveup.tv_sec * 1000000 + giveup.tv_usec)-((unsigned long long)wakeup.tv_sec * 1000000 + wakeup.tv_usec))/1000);
-	task_yeild();
+	printf("[PID %d] %d-th job ended at %ld.%.6ld\n", pid, i, giveup.tv_sec, giveup.tv_usec);
+	printf("[PID %d] %d-th job ProcessTime is %llu ms\n", pid, i, (((unsigned long long) giveup.tv_sec * 1000000 + giveup.tv_usec)-((unsigned long long)wakeup.tv_sec * 1000000 + wakeup.tv_usec))/1000);
+
+        // YIELD
+	task_yield();
     }
 
+    // DE-REGISTRATION
     task_deregister();
+
     return 0;
 }
