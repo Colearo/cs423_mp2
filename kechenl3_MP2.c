@@ -292,6 +292,10 @@ struct mp2_task_struct* get_highest_task(void) {
 	}
     }
 
+    if (res != NULL) {
+	printk(KERN_DEBUG "Find the highest %d", res->rb.pid);
+    }
+
     return res;
 }
 
