@@ -34,6 +34,9 @@ struct kmem_cache *tasks_cache;
 // Kernel dispatcher name
 #define RMS_DISPATCHER "rms_dispatcher"
 
+// Admission Control Rate Constraint
+#define AC_RATE 693
+
 // Spinlock
 spinlock_t sl;
 
@@ -118,7 +121,7 @@ static void timer_callback(unsigned long data) {
 // Admission control check if the 
 static bool admission_control(unsigned long period, unsigned long c_period) {
     unsigned long rate = c_period * 1000 / period;
-    if (rate + rate_sum <= 693) {
+    if (rate + rate_sum <= AC_RATE) {
 	rate_sum += rate;
 	return true;
     } else {
@@ -303,6 +306,9 @@ static int dispatching(void *data) {
 
 	spin_lock_irqsave(&sl, flags);
 
+	// If there are current task running, and its state is RUNNING
+	// we do want to preempt it, and decrease its priority
+	// and meanwhile let its state become READY
 	if (curr_mp2_task && curr_mp2_task->state == RUNNING) {
 		curr_mp2_task->state = READY;
 		set_task_state(curr_mp2_task->linux_task, TASK_INTERRUPTIBLE);
@@ -310,27 +316,35 @@ static int dispatching(void *data) {
 		sched_setscheduler(curr_mp2_task->linux_task, SCHED_NORMAL, &sparam);
 		printk(KERN_DEBUG "Old Task %d Running to Ready\n", curr_mp2_task->rb.pid);
 		curr_mp2_task = NULL;
+	// Else if the state is not RUNNING, we just decrease its priority
 	} else if (curr_mp2_task) {
 	    sparam.sched_priority = 0;
 	    sched_setscheduler(curr_mp2_task->linux_task, SCHED_NORMAL, &sparam);
 	    printk(KERN_DEBUG "Old Task %d Not Running\n", curr_mp2_task->rb.pid);
 	}
 
+	// We iterate the registration list to get the highest priority task
+	// which has the highest rate or if their process time is constant
+	// and its state is READY, we want the shortest period
 	highest = get_highest_task();
+	// If we do not have highest READY in the list, sleep the 
+	// dispatching thread and let the current one running since
+	// it would be put in the run queue again
 	if (highest == NULL) {
 	    spin_unlock_irqrestore(&sl, flags);
 	    goto SLEEP;
 	}
 	highest->state = RUNNING;
 	
-	// set_task_state(highest->linux_task, TASK_RUNNING)
-	// Wake up the highest task
+	// Wake up the highest task and let the priority become the 
+	// highest 99 with FIFO scheduling
 	printk(KERN_DEBUG "New Task %d Running\n", highest->rb.pid);
 	sparam.sched_priority = 99;
 	sched_setscheduler(highest->linux_task, SCHED_FIFO, &sparam);
 	curr_mp2_task = highest;
 	wake_up_process(highest->linux_task);
 
+	// Release the spinlock
 	spin_unlock_irqrestore(&sl, flags);
 
 SLEEP:	// Sleep
@@ -427,6 +441,7 @@ ssize_t write_call(struct file *file,
 		goto RET;
 	    printk(KERN_DEBUG "PID: [%d]\n", (int)pid_val);
 
+	    // Do the YIELD for relinquishing the CPU control
 	    ret = yielding((unsigned int)pid_val);
 	    if (ret != 0)
 		goto RET;
@@ -445,6 +460,8 @@ ssize_t write_call(struct file *file,
 		goto RET;
 	    printk(KERN_DEBUG "PID: [%d]\n", (int)pid_val);
 
+	    // Do the DE-REGISTRATION to remove from the list and 
+	    // clean the related recources
 	    ret = deregistration(pid_val);
 	    if (ret != 0)
 		goto RET;
