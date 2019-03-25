@@ -280,14 +280,14 @@ static ssize_t yielding(unsigned int pid) {
 // Helper function to get the highest priority 
 struct mp2_task_struct* get_highest_task(void) {
     struct mp2_task_struct *cur, *temp, *res;
-    unsigned long long shortest = -1;
+    unsigned long long largest = 0;
     res = NULL;
 
     //Iterate the whole linked list to found the one with shortest period
     list_for_each_entry_safe(cur, temp, &reg_task_list, next) {
 	// If the current task's period is shorter than the found
-	if (cur->state == READY && ((unsigned long long)cur->rb.computation_period * 10000 / cur->rb.period) < shortest) {
-	    shortest = (unsigned long long)cur->rb.computation_period * 10000 / cur->rb.period;
+	if (cur->state == READY && ((unsigned long long)cur->rb.computation_period * 10000 / cur->rb.period) > largest) {
+	    largest = (unsigned long long)cur->rb.computation_period * 10000 / cur->rb.period;
 	    res = cur;
 	}
     }
