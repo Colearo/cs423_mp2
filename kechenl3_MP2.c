@@ -572,7 +572,7 @@ void __exit mp2_exit(void) {
    struct mp2_task_struct *cur, *temp;
 
    #ifdef DEBUG
-   printk(KERN_ALERT "MP1 MODULE UNLOADING\n");
+   printk(KERN_ALERT "MP2 MODULE UNLOADING\n");
    #endif
 
    // Remove all the proc file entry and dir we created before
