@@ -118,7 +118,8 @@ static void timer_callback(unsigned long data) {
     printk(KERN_DEBUG "Timer after waking up dispatcher\n");
 }
 
-// Admission control check if the 
+// Admission control check if the rate sum is larger than the 
+// admission control rate constraints
 static bool admission_control(unsigned long period, unsigned long c_period) {
     unsigned long rate = c_period * 1000 / period;
     if (rate + rate_sum <= AC_RATE) {
